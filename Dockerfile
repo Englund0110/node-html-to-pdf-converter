@@ -1,7 +1,7 @@
 FROM alpine
  
 RUN apk add --no-cache \
-      chromium \
+      chromium=130.0.6723.69-r0 \
       nss \
       freetype \
       harfbuzz \

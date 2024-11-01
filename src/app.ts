@@ -1,11 +1,6 @@
 import express from "express";
-import puppeteer, { Browser, PDFMargin, Page } from "puppeteer";
+import puppeteer, { Browser } from "puppeteer";
 import genericPool from "generic-pool";
-import signpdf from "@signpdf/signpdf";
-import { P12Signer } from "@signpdf/signer-p12";
-import { plainAddPlaceholder } from '@signpdf/placeholder-plain';
-import fs from "fs";
-import path from "path";
 
 interface IRequestBody {
   ContentHtml: string | undefined;
@@ -15,22 +10,20 @@ interface IRequestBody {
   // },
   HeaderHtml: string | undefined;
   FooterHtml: string | undefined;
-  SigningCertificateThumbprint: string | undefined;
-  Sign: boolean
 }
 
 const app = express();
 const port = process.env.PORT ?? 3000
+const headlessMode: boolean | 'shell' | undefined = true;
 
-let globalBrowserInstance: Browser | undefined = undefined; 
-puppeteer.launch({ headless: 'new' }).then((browser) => globalBrowserInstance = browser);
+let globalBrowserInstance: Browser | undefined = undefined;
+puppeteer.launch({ headless: headlessMode }).then((browser) => globalBrowserInstance = browser);
 
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
 // Create a pool of browser instances
-//const browserPool = createBrowserPool();
-const pagePool = createPagePool();
+const browserPool = createBrowserPool();
 
 app.post("/", async (req: express.Request, res: express.Response) => {
   try {
@@ -38,41 +31,35 @@ app.post("/", async (req: express.Request, res: express.Response) => {
       res.status(400).send('HTML is missing from body')
     } else {
       const html = (req.body as IRequestBody).ContentHtml!;
+      const headerHtml = (req.body as IRequestBody).HeaderHtml ?? undefined;
+      const footerHtml = (req.body as IRequestBody).FooterHtml ?? undefined;
 
       // Acquire a browser instance from the pool
-      // const browserInstance = await browserPool.acquire() ?? puppeteer.launch({ headless: 'new' });
+      const browserInstance = await browserPool.acquire() ?? puppeteer.launch({ headless: headlessMode });
 
       // const browserInstance = await puppeteer.launch({headless: 'new'});
 
-      // const page = await browserInstance.newPage();
-      const page = await pagePool.acquire();
+      const page = await browserInstance.newPage();
       await page.setContent(html, { waitUntil: "domcontentloaded" });
       await page.emulateMediaType("screen");
 
       const pdfBuffer = await page.pdf({
-        margin: { top: "100px", right: "25px", bottom: "100px", left: "25px" },
-        // printBackground: true,
+        margin: { top: "0px", right: "25px", bottom: "100px", left: "25px" },
         format: "A4",
-        // pageRanges: "",
+        headerTemplate: headerHtml,
+        footerTemplate: footerHtml,
+        displayHeaderFooter: headerHtml || footerHtml ? true : false,
         // headerTemplate: "<div id='header'><span>Dette er en header</span></div>",
-        headerTemplate: "<div></div>",
         // footerTemplate: "<div style='color: lightgray; border-top: solid lightgray 1px; font-size: 10px; padding-top: 5px; text-align: center; width: 100%;'><span>This is a test message</span> - <span class='pageNumber'></span> / <span class='totalPages'></span></div>",
-        footerTemplate: "<div></div>",
-        displayHeaderFooter: true,
-        // path: Math.random() + "_result.pdf",
       });
 
-      // await page.close();
-      // await browserInstance.close();
+      console.log("Version", await browserInstance.version());
+      await browserInstance.close();
 
       // Release the browser instance back to the pool
-      // browserPool.destroy(browserInstance);
+      browserPool.destroy(browserInstance);
 
-      pagePool.destroy(page);
-
-      const bufferResult = (req.body as IRequestBody).Sign ?
-        await signPdf(pdfBuffer) :
-        pdfBuffer;
+      const bufferResult = pdfBuffer;
 
       res.writeHead(200, {
         "Content-Type": "application/pdf",
@@ -100,11 +87,12 @@ app.listen(port, () => {
 function createBrowserPool(): genericPool.Pool<Browser> {
   const browserFactory = {
     create: async () => {
-      console.log("Creating new pool");
-      return puppeteer.launch({ headless: 'new' });
+      const browserInstance = await puppeteer.launch({ headless: headlessMode });
+      console.log(`Creating browser instance (PID: ${browserInstance.process()!.pid})`);
+      return browserInstance;
     },
     destroy: async (browserInstance: Browser) => {
-      console.log("Destroying pool");
+      console.log(`Destroying browser instance (PID: ${browserInstance.process()!.pid})`);
       await browserInstance.close();
     },
   };
@@ -117,44 +105,6 @@ function createBrowserPool(): genericPool.Pool<Browser> {
   });
 }
 
-function createPagePool(): genericPool.Pool<Page> {
-  const pageFactory = {
-    create: async () => {
-      console.log("Creating new page");
-      var page = globalBrowserInstance!.newPage();
-      return page;
-    },
-    destroy: async (pageInstance: Page) => {
-      console.log("Destroying page");
-      await pageInstance.close();
-    },
-  };
-
-  return genericPool.createPool(pageFactory, {
-    min: 5,
-    max: 5,
-    testOnBorrow: false,
-    acquireTimeoutMillis: 30000,
-  });
-}
-
-async function signPdf(pdfBuffer: Buffer): Promise<Buffer> {
-  var certificatePath = path.join(__dirname, '/../oces3_-test-_systemcertifikat.p12');
-  var certificateBuffer = fs.readFileSync(certificatePath);
-  var signer = new P12Signer(certificateBuffer, { passphrase: 'c5,PnmF8;m4I' });
-
-  const pdfWithPlaceholder = plainAddPlaceholder({
-    pdfBuffer: pdfBuffer,
-    reason: '',
-    contactInfo: '',
-    name: '',
-    location: '',
-    subFilter: 'ETSI.CAdES.detached'
-  });
-
-  return await signpdf.sign(pdfWithPlaceholder, signer);
-}
-
 // Handle shutdown
 process.on('SIGTERM', gracefulShutdown);
 process.on('SIGINT', gracefulShutdown);
@@ -162,10 +112,22 @@ process.on('SIGINT', gracefulShutdown);
 function gracefulShutdown() {
   console.log('Shutting down gracefully...');
 
-  globalBrowserInstance?.close().then(() => {
-    console.log("Browser closed")
-    process.exit(0);
-  })
+  // Close the browser pool
+  browserPool.drain().then(() => {
+    browserPool.clear();
+    console.log("Browser pool drained and cleared");
+
+    globalBrowserInstance?.close().then(() => {
+      console.log("Global browser instance closed");
+      process.exit(0);
+    }).catch((error) => {
+      console.error("Error closing global browser instance:", error);
+      process.exit(1);
+    });
+  }).catch((error) => {
+    console.error("Error draining browser pool:", error);
+    process.exit(1);
+  });
 
   // Force close the server after 5 seconds
   setTimeout(() => {
