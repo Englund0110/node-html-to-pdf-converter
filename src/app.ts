@@ -1,23 +1,12 @@
 import express from "express";
-import puppeteer, { Browser } from "puppeteer";
+import puppeteer, { Browser, PDFMargin } from "puppeteer";
 import genericPool from "generic-pool";
-
-interface IRequestBody {
-  ContentHtml: string | undefined;
-  // isHtmlBase64Encoded: boolean | undefined;
-  // pdfOptions: undefined | {
-  //   margin: PDFMargin | undefined
-  // },
-  HeaderHtml: string | undefined;
-  FooterHtml: string | undefined;
-}
+import { CreatePdfRequestDto } from "./types";
+import { applyPdfUaMetadata } from "./pdfUa";
 
 const app = express();
-const port = process.env.PORT ?? 3000
+const port = process.env.PORT ?? 3030
 const headlessMode: boolean | 'shell' | undefined = true;
-
-let globalBrowserInstance: Browser | undefined = undefined;
-puppeteer.launch({ headless: headlessMode }).then((browser) => globalBrowserInstance = browser);
 
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
@@ -25,41 +14,20 @@ app.use(express.urlencoded({ extended: true }));
 // Create a pool of browser instances
 const browserPool = createBrowserPool();
 
-app.post("/", async (req: express.Request, res: express.Response) => {
+app.post("/api/pdf/create", async (req: express.Request, res: express.Response) => {
   try {
-    if (!(req.body as IRequestBody).ContentHtml) {
+    if (!(req.body as CreatePdfRequestDto).ContentHtml) {
       res.status(400).send('HTML is missing from body')
     } else {
-      const html = (req.body as IRequestBody).ContentHtml!;
-      const headerHtml = (req.body as IRequestBody).HeaderHtml ?? undefined;
-      const footerHtml = (req.body as IRequestBody).FooterHtml ?? undefined;
+      const contentHtml = (req.body as CreatePdfRequestDto).ContentHtml!;
+      const headerHtml = (req.body as CreatePdfRequestDto).HeaderHtml ?? undefined;
+      const footerHtml = (req.body as CreatePdfRequestDto).FooterHtml ?? undefined;
+      const margin = (req.body as CreatePdfRequestDto).Margin ?? undefined;
+      const title = (req.body as CreatePdfRequestDto).Title ?? undefined;
+      const language = (req.body as CreatePdfRequestDto).Language ?? undefined;
 
-      // Acquire a browser instance from the pool
-      const browserInstance = await browserPool.acquire() ?? puppeteer.launch({ headless: headlessMode });
-
-      // const browserInstance = await puppeteer.launch({headless: 'new'});
-
-      const page = await browserInstance.newPage();
-      await page.setContent(html, { waitUntil: "domcontentloaded" });
-      await page.emulateMediaType("screen");
-
-      const pdfBuffer = await page.pdf({
-        margin: { top: "0px", right: "25px", bottom: "100px", left: "25px" },
-        format: "A4",
-        headerTemplate: headerHtml,
-        footerTemplate: footerHtml,
-        displayHeaderFooter: headerHtml || footerHtml ? true : false,
-        // headerTemplate: "<div id='header'><span>Dette er en header</span></div>",
-        // footerTemplate: "<div style='color: lightgray; border-top: solid lightgray 1px; font-size: 10px; padding-top: 5px; text-align: center; width: 100%;'><span>This is a test message</span> - <span class='pageNumber'></span> / <span class='totalPages'></span></div>",
-      });
-
-      console.log("Version", await browserInstance.version());
-      await browserInstance.close();
-
-      // Release the browser instance back to the pool
-      browserPool.destroy(browserInstance);
-
-      const bufferResult = pdfBuffer;
+      // Create PDF
+      const bufferResult = await createPdf(contentHtml, headerHtml, footerHtml, margin, title, language);
 
       res.writeHead(200, {
         "Content-Type": "application/pdf",
@@ -75,13 +43,45 @@ app.post("/", async (req: express.Request, res: express.Response) => {
   }
 });
 
-app.get("/", function (req, res) {
-  res.send("hello world");
+app.get("/isAlive", async function (req, res) {
+  await createPdf(`<div>${new Date().toISOString()}</div>`);
+  res.send(true);
 });
 
 app.listen(port, () => {
   console.log(`Server is running on port ${port}`);
 });
+
+async function createPdf(contentHtml: string, headerHtml?: string, footerHtml?: string, margin?: PDFMargin, title?: string, language?: string): Promise<Uint8Array> {
+  const browserInstance = await browserPool.acquire() ?? puppeteer.launch({ headless: headlessMode });
+  const page = await browserInstance.newPage();
+  await page.setContent(contentHtml, { waitUntil: "domcontentloaded" });
+  await page.emulateMediaType("screen");
+
+  // Fallbacks for PDF/UA metadata: <title> and <html lang> from the content
+  const htmlTitle = await page.title();
+  const htmlLang = await page.evaluate(() => document.documentElement.lang);
+
+  const pdfBuffer = await page.pdf({
+    margin: margin ?? { top: "0px", right: "25px", bottom: "100px", left: "25px" },
+    format: "A4",
+    headerTemplate: headerHtml,
+    footerTemplate: footerHtml,
+    displayHeaderFooter:   headerHtml || footerHtml ? true : false,
+    tagged: true,
+    outline: true,
+    // headerTemplate: "<div id='header'><span>Dette er en header</span></div>",
+    // footerTemplate: "<div style='color: lightgray; border-top: solid lightgray 1px; font-size: 10px; padding-top: 5px; text-align: center; width: 100%;'><span>This is a test message</span> - <span class='pageNumber'></span> / <span class='totalPages'></span></div>",
+  });
+
+  await browserInstance.close();
+  browserPool.destroy(browserInstance);
+
+  return applyPdfUaMetadata(pdfBuffer, {
+    title: title || htmlTitle || "Document",
+    lang: language || htmlLang || undefined,
+  });
+}
 
 // Function to create a pool of browser instances
 function createBrowserPool(): genericPool.Pool<Browser> {
@@ -98,8 +98,8 @@ function createBrowserPool(): genericPool.Pool<Browser> {
   };
 
   return genericPool.createPool(browserFactory, {
-    min: 5,
-    max: 10,
+    min: 1,
+    max: 2,
     testOnBorrow: false,
     acquireTimeoutMillis: 30000,
   });
@@ -116,14 +116,6 @@ function gracefulShutdown() {
   browserPool.drain().then(() => {
     browserPool.clear();
     console.log("Browser pool drained and cleared");
-
-    globalBrowserInstance?.close().then(() => {
-      console.log("Global browser instance closed");
-      process.exit(0);
-    }).catch((error) => {
-      console.error("Error closing global browser instance:", error);
-      process.exit(1);
-    });
   }).catch((error) => {
     console.error("Error draining browser pool:", error);
     process.exit(1);

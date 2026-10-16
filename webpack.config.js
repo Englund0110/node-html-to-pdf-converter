@@ -26,11 +26,5 @@ module.exports = {
     bufferutil: "bufferutil",
     "utf-8-validate": "utf-8-validate",
   },
-  plugins: [
-    new CopyPlugin({
-      patterns: [
-        { from: "web.config", to: "" },
-      ],
-    }),
-  ]
+  plugins: []
 };
