@@ -1,11 +1,25 @@
 # Node HTML to PDF Creator
 
+## Prerequisites
+
+This project uses [pnpm](https://pnpm.io/) as its package manager. If you don't have it yet, enable it through Corepack (bundled with Node.js):
+
+```sh
+corepack enable pnpm
+```
+
+Or install it globally:
+
+```sh
+npm install -g pnpm
+```
+
 ## Installation
 
 To install the necessary dependencies, run the following command:
 
 ```sh
-npm install
+pnpm install
 ```
 
 ## Build
@@ -13,7 +27,7 @@ npm install
 To build the project, use the following command:
 
 ```sh
-npm run build
+pnpm build
 ```
 
 ## Development
@@ -21,7 +35,15 @@ npm run build
 To start the development server, run:
 
 ```sh
-npm run dev
+pnpm dev
+```
+
+## Testing
+
+To run the tests, use:
+
+```sh
+pnpm test
 ```
 
 ## Docker
