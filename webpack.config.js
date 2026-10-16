@@ -1,4 +1,5 @@
 const path = require("path");
+const CopyPlugin = require("copy-webpack-plugin");
 
 module.exports = {
   target: "node",
@@ -25,4 +26,5 @@ module.exports = {
     bufferutil: "bufferutil",
     "utf-8-validate": "utf-8-validate",
   },
+  plugins: []
 };
